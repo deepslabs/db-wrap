@@ -1,0 +1,22 @@
+[package]
+name = "db-wrap"
+version = "0.1.2"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+server = ["rocket", "rocket_contrib", "log"]
+
+[dependencies]
+anyhow = "1.0"
+log = { version = "0.4.14", optional = true }
+toml = "0.5.8"
+rocksdb = "0.21.0"
+rocket = { version = "0.4.2", optional = true }
+rocket_contrib = { version = "0.4.2", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+parking_lot = "0.10.0"
+sha2 = "0.8"
+hex = "0.4.0"
