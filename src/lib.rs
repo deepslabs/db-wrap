@@ -12,8 +12,8 @@ pub use rocksdb;
 pub fn sha2_hash256(msg: &[u8]) -> Vec<u8> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.input(msg);
-    hasher.result()[..].to_vec()
+    hasher.update(msg);
+    hasher.finalize()[..].to_vec()
 }
 
 pub fn bytes_to_hide_hex(bytes: &[u8], hl: usize, el: usize, padding: Option<&str>) -> String {
@@ -52,6 +52,7 @@ pub mod db_server {
     use rocksdb::Options;
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
+    use subtle::ConstantTimeEq;
 
     #[derive(Deserialize, Clone)]
     pub struct DbConfig {
@@ -84,11 +85,21 @@ pub mod db_server {
         serde_json::to_string(&value).map_err(|e| format!("{} serialize err: {:?}", at, e))
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     pub struct HttpRequest {
         pub token: String,
         pub req: RequestType,
         pub path: String,
+    }
+
+    impl std::fmt::Debug for HttpRequest {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("HttpRequest")
+                .field("token", &"[REDACTED]")
+                .field("req", &self.req)
+                .field("path", &self.path)
+                .finish()
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +119,7 @@ pub mod db_server {
         token: State<Arc<String>>,
         request: Json<HttpRequest>,
     ) -> Json<Result<String, String>> {
-        if token.clone().as_str() != request.0.token.as_str() {
+        if token.as_bytes().ct_eq(request.0.token.as_bytes()).unwrap_u8() == 0 {
             return Json(Err("Invalid token".to_string()));
         }
         let path = request.0.path.clone();

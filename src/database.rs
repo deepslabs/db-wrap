@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use parking_lot::RwLock;
 use rocksdb::{Options, WriteBatch, DB};
 use std::collections::HashMap;
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 const DEFAULT_LEVEL: u8 = 3;
@@ -60,21 +61,38 @@ impl DbWrap {
     }
 
     pub fn db(&self, path: &str) -> Result<Arc<DB>> {
-        let path = self.path.clone() + "/" + path;
-        let mut dbs = self.dbs.write();
-        let db = match dbs.get(&path) {
-            Some(db) => db.clone(),
-            None => match DB::open(&self.opt, &path) {
-                Ok(db) => {
-                    let db = Arc::new(db);
-                    dbs.insert(path.into(), db.clone());
-                    db
+        // Prevent path traversal: reject absolute paths and `..` components
+        for component in Path::new(path).components() {
+            match component {
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    bail!("invalid db path: {}", path);
                 }
-                Err(e) => bail!("{}", e.to_string()),
-            },
-        };
+                _ => {}
+            }
+        }
+        let full_path = self.path.clone() + "/" + path;
 
-        Ok(db)
+        // Fast path: read lock — avoids write contention when DB is already open
+        {
+            let dbs = self.dbs.read();
+            if let Some(db) = dbs.get(&full_path) {
+                return Ok(db.clone());
+            }
+        }
+
+        // Slow path: write lock — double-checked to handle concurrent openers
+        let mut dbs = self.dbs.write();
+        if let Some(db) = dbs.get(&full_path) {
+            return Ok(db.clone());
+        }
+        match DB::open(&self.opt, &full_path) {
+            Ok(db) => {
+                let db = Arc::new(db);
+                dbs.insert(full_path, db.clone());
+                Ok(db)
+            }
+            Err(e) => bail!("{}", e),
+        }
     }
 
     pub fn flush(&self, path: &str) -> Result<()> {
@@ -161,15 +179,13 @@ impl DbWrap {
 
     pub fn get_prefix<K: AsRef<[u8]>>(&self, k: K, path: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let db = self.db(path)?;
-        let keys = self.search_keys_by_prefix(&k, &db);
+        let keys = self.search_keys_by_prefix(&k, &db)?;
         let mut datas = vec![];
-        if !keys.is_empty() {
-            for key in keys {
-                match db.get(&key) {
-                    Ok(Some(data)) => datas.push((key.clone(), data.data_without_lv())),
-                    Ok(None) => (),
-                    Err(e) => bail!("database get key error: {e:?}"),
-                }
+        for key in keys {
+            match db.get(&key) {
+                Ok(Some(data)) => datas.push((key, data.data_without_lv())),
+                Ok(None) => (),
+                Err(e) => bail!("database get key error: {e:?}"),
             }
         }
         Ok(datas)
@@ -177,43 +193,38 @@ impl DbWrap {
 
     pub fn delete_prefix<K: AsRef<[u8]>>(&self, k: K, path: &str) -> Result<()> {
         let db = self.db(path)?;
-        let keys = self.search_keys_by_prefix(&k, &db);
-
+        let keys = self.search_keys_by_prefix(&k, &db)?;
         if !keys.is_empty() {
-            for key in keys {
-                db.delete(&key)?;
+            let mut batch = WriteBatch::default();
+            for key in &keys {
+                batch.delete(key);
             }
+            db.write(batch).map_err(|e| anyhow!("{:?}", e))?;
         }
         Ok(())
     }
 
-    fn search_keys_by_prefix<K: AsRef<[u8]>>(&self, prefix: K, db: &Arc<DB>) -> Vec<Vec<u8>> {
+    fn search_keys_by_prefix<K: AsRef<[u8]>>(&self, prefix: K, db: &Arc<DB>) -> Result<Vec<Vec<u8>>> {
+        let prefix = prefix.as_ref();
         let mut keys = Vec::new();
-        let mut prev_iter = db.raw_iterator();
-        prev_iter.seek(&prefix);
-        while prev_iter.valid() {
-            match prev_iter.key() {
-                Some(key_slice) => {
-                    if is_prefix(prefix.as_ref(), key_slice) {
-                        keys.push(key_slice.to_vec());
-                    }
+        let mut iter = db.raw_iterator();
+        iter.seek(prefix);
+        while iter.valid() {
+            match iter.key() {
+                Some(key_slice) if key_slice.starts_with(prefix) => {
+                    keys.push(key_slice.to_vec());
                 }
-                None => (),
+                // Key no longer shares prefix — sorted order means we can stop
+                _ => break,
             }
-            prev_iter.next();
+            iter.next();
         }
-        keys
+        // Surface any I/O error that terminated the iteration early
+        iter.status().map_err(|e| anyhow!("iterator error: {:?}", e))?;
+        Ok(keys)
     }
 }
 
 pub fn is_prefix(prefix: &[u8], key: &[u8]) -> bool {
-    if key.len() < prefix.len() {
-        return false;
-    }
-    for i in 0..prefix.len() {
-        if key[i] != prefix[i] {
-            return false;
-        }
-    }
-    true
+    key.starts_with(prefix)
 }
