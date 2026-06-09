@@ -6,15 +6,16 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
 default = []
-server = ["rocket", "rocket_contrib", "log", "subtle"]
+server = ["axum", "tokio", "tower-http", "log", "subtle"]
 
 [dependencies]
 anyhow = "1.0"
 log = { version = "0.4.14", optional = true }
 toml = "0.5.8"
 rocksdb = { version = "0.21.0", default-features = false, features = ["snappy"] }
-rocket = { version = "0.4.2", optional = true }
-rocket_contrib = { version = "0.4.2", optional = true }
+axum = { version = "0.6", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"], optional = true }
+tower-http = { version = "0.4", features = ["cors"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 parking_lot = "0.10.0"

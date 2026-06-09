@@ -39,16 +39,24 @@ where
     }
 }
 
-impl DataLevel for &[u8] {}
-
-impl DataLevel for Vec<u8> {}
-
-impl DataLevel for &Vec<u8> {}
+impl<T: AsRef<[u8]>> DataLevel for T {}
 
 pub struct DbWrap {
     path: String,
     opt: Options,
     dbs: RwLock<HashMap<String, Arc<DB>>>,
+}
+
+/// Check that an existing value's level does not prevent an overwrite.
+fn check_level(old: &[u8], new_lv: u8, force: bool) -> Result<()> {
+    if old.data_lv() < new_lv && !force {
+        bail!(
+            "can't put data with level {} which exists with level {} without force",
+            new_lv,
+            old.data_lv()
+        );
+    }
+    Ok(())
 }
 
 impl DbWrap {
@@ -85,14 +93,9 @@ impl DbWrap {
         if let Some(db) = dbs.get(&full_path) {
             return Ok(db.clone());
         }
-        match DB::open(&self.opt, &full_path) {
-            Ok(db) => {
-                let db = Arc::new(db);
-                dbs.insert(full_path, db.clone());
-                Ok(db)
-            }
-            Err(e) => bail!("{}", e),
-        }
+        let db = Arc::new(DB::open(&self.opt, &full_path)?);
+        dbs.insert(full_path, db.clone());
+        Ok(db)
     }
 
     pub fn flush(&self, path: &str) -> Result<()> {
@@ -102,34 +105,17 @@ impl DbWrap {
 
     pub fn get<K: AsRef<[u8]>>(&self, k: K, path: &str) -> Result<Option<Vec<u8>>> {
         let db = self.db(path)?;
-        let value = match db.get(k) {
-            Ok(value) => value,
-            Err(e) => {
-                bail!("database get error: {e:?}");
-            }
-        };
-        match value {
-            Some(v) => {
-                let v = v.data_without_lv();
-                Ok(Some(v))
-            }
+        match db.get(k)? {
+            Some(v) => Ok(Some(v.data_without_lv())),
             None => Ok(None),
         }
     }
 
     pub fn put<K: AsRef<[u8]>>(&self, k: K, v: Vec<u8>, lv: u8, force: bool, path: &str) -> Result<()> {
         let db = self.db(path)?;
-        match db.get(&k) {
-            Ok(Some(old)) => {
-                if old.data_lv() < lv && !force {
-                    bail!("can't put data with level {lv} which exist with DataLevel {} without force", old.data_lv());
-                }
-            }
-            Err(e) => {
-                bail!("database put-check error: {:?}", e);
-            }
-            Ok(None) => (),
-        };
+        if let Ok(Some(old)) = db.get(&k) {
+            check_level(&old, lv, force)?;
+        }
         db.put(k, &v.data_with_lv(lv))?;
         Ok(())
     }
@@ -144,17 +130,9 @@ impl DbWrap {
         let db = self.db(path)?;
         let mut batch = WriteBatch::default();
         for (k, v) in pairs {
-            match db.get(&k) {
-                Ok(Some(old)) => {
-                    if old.data_lv() < lv && !force {
-                        bail!("can't put data with level {lv} which exist with DataLevel {} without force", old.data_lv());
-                    }
-                }
-                Err(e) => {
-                    bail!("database put-check error: {:?}", e);
-                }
-                Ok(None) => (),
-            };
+            if let Ok(Some(old)) = db.get(&k) {
+                check_level(&old, lv, force)?;
+            }
             batch.put(k, &v.data_with_lv(lv));
         }
         db.write(batch).map_err(|e| anyhow!("{:?}", e))?;
@@ -179,7 +157,7 @@ impl DbWrap {
 
     pub fn get_prefix<K: AsRef<[u8]>>(&self, k: K, path: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let db = self.db(path)?;
-        let keys = self.search_keys_by_prefix(&k, &db)?;
+        let keys = search_keys_by_prefix(k.as_ref(), &db)?;
         let mut datas = vec![];
         for key in keys {
             match db.get(&key) {
@@ -193,7 +171,7 @@ impl DbWrap {
 
     pub fn delete_prefix<K: AsRef<[u8]>>(&self, k: K, path: &str) -> Result<()> {
         let db = self.db(path)?;
-        let keys = self.search_keys_by_prefix(&k, &db)?;
+        let keys = search_keys_by_prefix(k.as_ref(), &db)?;
         if !keys.is_empty() {
             let mut batch = WriteBatch::default();
             for key in &keys {
@@ -203,28 +181,22 @@ impl DbWrap {
         }
         Ok(())
     }
-
-    fn search_keys_by_prefix<K: AsRef<[u8]>>(&self, prefix: K, db: &Arc<DB>) -> Result<Vec<Vec<u8>>> {
-        let prefix = prefix.as_ref();
-        let mut keys = Vec::new();
-        let mut iter = db.raw_iterator();
-        iter.seek(prefix);
-        while iter.valid() {
-            match iter.key() {
-                Some(key_slice) if key_slice.starts_with(prefix) => {
-                    keys.push(key_slice.to_vec());
-                }
-                // Key no longer shares prefix — sorted order means we can stop
-                _ => break,
-            }
-            iter.next();
-        }
-        // Surface any I/O error that terminated the iteration early
-        iter.status().map_err(|e| anyhow!("iterator error: {:?}", e))?;
-        Ok(keys)
-    }
 }
 
-pub fn is_prefix(prefix: &[u8], key: &[u8]) -> bool {
-    key.starts_with(prefix)
+/// Collect all keys from `db` whose value starts with `prefix`.
+fn search_keys_by_prefix(prefix: &[u8], db: &DB) -> Result<Vec<Vec<u8>>> {
+    let mut keys = Vec::new();
+    let mut iter = db.raw_iterator();
+    iter.seek(prefix);
+    while iter.valid() {
+        match iter.key() {
+            Some(key_slice) if key_slice.starts_with(prefix) => {
+                keys.push(key_slice.to_vec());
+            }
+            _ => break,
+        }
+        iter.next();
+    }
+    iter.status().map_err(|e| anyhow!("iterator error: {:?}", e))?;
+    Ok(keys)
 }
