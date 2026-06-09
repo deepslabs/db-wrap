@@ -12,7 +12,7 @@ server = ["rocket", "rocket_contrib", "log", "subtle"]
 anyhow = "1.0"
 log = { version = "0.4.14", optional = true }
 toml = "0.5.8"
-rocksdb = "0.21.0"
+rocksdb = { version = "0.21.0", default-features = false, features = ["snappy"] }
 rocket = { version = "0.4.2", optional = true }
 rocket_contrib = { version = "0.4.2", optional = true }
 serde = { version = "1.0", features = ["derive"] }
