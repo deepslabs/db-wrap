@@ -103,6 +103,16 @@ impl DbWrap {
         Ok(())
     }
 
+    /// Flush the WAL (Write-Ahead Log) buffer to disk.
+    /// If `sync` is true, also fsyncs the data to the storage device.
+    /// Critical in SGX/Occlum environments where the enclave process
+    /// can be killed unexpectedly — without flushing the WAL, recent
+    /// writes may sit in intermediate buffers and be lost.
+    pub fn flush_wal(&self, path: &str, sync: bool) -> Result<()> {
+        self.db(path)?.flush_wal(sync)?;
+        Ok(())
+    }
+
     pub fn get<K: AsRef<[u8]>>(&self, k: K, path: &str) -> Result<Option<Vec<u8>>> {
         let db = self.db(path)?;
         match db.get(k)? {
